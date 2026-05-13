@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Data and Notebooks
+*.ipynb
+*.csv
+*.zip
+*.png
+*.jpg
+*.jpeg
+*.pdf
+
+# Experiments Folder
+# Keep the folder but ignore specific contents if needed
+# experiments/
+
+# LaTeX
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.synctex.gz
+*.toc
+*.out
+
+# Specific Large Files
+FLAGED_data_enhanced.csv
+FLAGED_data_enhanced_with_lat_long.csv
+flutter_application_6 (2).zip
