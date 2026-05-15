@@ -49,6 +49,7 @@ screenshots/
 
 # LaTeX & Documentation
 *.tex
+*.pdf
 *.aux
 *.fdb_latexmk
 *.fls
