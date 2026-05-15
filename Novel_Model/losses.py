@@ -207,6 +207,36 @@ def find_recall_threshold(
     return best
 
 
+def find_max_accuracy_threshold(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+) -> dict:
+    """
+    Finds the decision threshold that maximises accuracy.
+
+    For highly imbalanced data this usually sits at a high threshold
+    (the model becomes very conservative and gets almost all of the majority
+    class right). Returned dict matches the format of find_recall_threshold.
+    """
+    from sklearn.metrics import accuracy_score as _acc
+    thresholds = np.linspace(0.01, 0.99, 250)
+    best = {'threshold': 0.5, 'recall': 0.0, 'precision': 0.0,
+            'f1': 0.0, 'accuracy': 0.0}
+
+    for t in thresholds:
+        preds = (y_prob >= t).astype(int)
+        acc   = _acc(y_true, preds)
+        if acc > best['accuracy']:
+            best = {
+                'threshold': t,
+                'accuracy':  acc,
+                'recall':    recall_score(y_true, preds, zero_division=0),
+                'precision': precision_score(y_true, preds, zero_division=0),
+                'f1':        f1_score(y_true, preds, zero_division=0),
+            }
+    return best
+
+
 def threshold_analysis_table(y_true: np.ndarray, y_prob: np.ndarray) -> list:
     """
     Returns a table of Recall/Precision/F1 at several candidate thresholds.

@@ -1,329 +1,271 @@
 """
-Sequence Builder — FWI-Gated LSTM Pipeline
-==========================================
-Loads FLAGED_data.csv, engineers all 35 features, builds 14-day rolling
-windows per (lat, lon) location, and returns train/val/test arrays.
+Sequence Builder — FWI-Gated LSTM (Novel Model)
+================================================
+Journal Publication | Wildfire Prediction — Indian Subcontinent
 
-Key Design Decisions
----------------------
-1. Temporal train/test split: TEST_YEARS (2019-2020) held out — no leakage.
-2. Validation split carved from TRAINING data BEFORE SMOTE:
-   - This ensures val set has the real ~1.7% fire distribution.
-   - Training recall during Keras fit() therefore reflects test-time recall.
-   - NOT doing this causes "recall looks great in training, collapses at test" bug.
-3. SMOTE applied ONLY to training fold.
-4. StandardScaler fitted on training data only.
+Builds per-location 14-day rolling sequences for the LSTM models.
+
+Pipeline (leak-free):
+  1. Load FLAGED_data.csv and engineer all 35 features.
+  2. Sort by (date, latitude, longitude) and build one 14-day sequence
+     per (location, date) pair — treating each grid cell independently.
+  3. Temporal hold-out: sequences whose TARGET day falls in TEST_YEARS
+     become the test set. All prior sequences become training candidates.
+  4. Validation carve-out: 15% of training sequences are held out BEFORE
+     SMOTE — so val_recall during training reflects real ~1.7% fire rate.
+  5. StandardScaler fitted ONLY on training fold (prevents leakage).
+  6. SMOTE applied to training fold ONLY → balanced training set.
+
+Returns:
+    dict with keys: X_train, y_train, X_val, y_val, X_test, y_test,
+                    seq_len, n_features, fwi_idx
 """
 
+import os
 import numpy as np
 import pandas as pd
+import joblib
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
-import joblib
-import os
+
 import config
 
 
-# --- Feature Engineering ------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Feature Engineering (mirrors the paper's baseline exactly)
+# ---------------------------------------------------------------------------
 
-def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Computes all 19 engineered interaction features using EXACTLY the same
-    formulas as All.ipynb (the notebook that produced FLAGED_data_enhanced.csv).
-    """
-    d = df.copy()
+def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Adds all 19 engineered interaction features in-place."""
+    print("[SequenceBuilder] Engineering features...")
 
-    # Interaction features
-    d['temp_humidity_interaction']     = d['temp'] * d['humidity'] / 100
-    d['wind_temp_interaction']         = d['wind_speed'] * (d['temp'] + 273.15)
-    d['fwi_temp_ratio']                = d['FWI'] / (d['temp'] + 50)
-    d['humidity_rainfall_interaction'] = d['humidity'] * (d['rainfall'] + 0.001)
+    df['temp_humidity_interaction']   = df['temp'] * df['humidity'] / 100.0
+    df['wind_temp_interaction']       = df['wind_speed'] * (df['temp'] + 273.15)
+    df['fwi_temp_ratio']              = df['FWI'] / (df['temp'] + 50.0)
+    df['humidity_rainfall_interaction'] = df['humidity'] * (df['rainfall'] + 0.001)
 
-    # Polynomial features
-    d['temp_squared']       = d['temp'] ** 2
-    d['fwi_squared']        = d['FWI'] ** 2
-    d['wind_speed_squared'] = d['wind_speed'] ** 2
-    d['humidity_squared']   = d['humidity'] ** 2
+    df['temp_squared']      = df['temp'] ** 2
+    df['fwi_squared']       = df['FWI'] ** 2
+    df['wind_speed_squared']= df['wind_speed'] ** 2
+    df['humidity_squared']  = df['humidity'] ** 2
 
-    # Physical drought indices
-    d['dryness_index']     = (100 - d['humidity']) * (d['temp'] + 10) / 100
-    d['fire_danger_index'] = (d['FWI'] * (100 - d['humidity']) * (d['temp'] + 10)) \
-                             / (d['rainfall'] + 1)
-    d['wind_dryness']      = d['wind_speed'] * (100 - d['humidity'])
+    df['dryness_index']     = (100 - df['humidity']) * (df['temp'] + 10) / 100.0
+    df['fire_danger_index'] = (
+        df['FWI'] * (100 - df['humidity']) * (df['temp'] + 10)
+        / (df['rainfall'] + 1)
+    )
+    df['wind_dryness']      = df['wind_speed'] * (100 - df['humidity'])
 
-    # Temperature deviation (global mean over full dataset)
-    temp_mean = d['temp'].mean()
-    d['temp_deviation'] = (d['temp'] - temp_mean).abs()
+    global_mean_temp        = df['temp'].mean()
+    df['temp_deviation']    = np.abs(df['temp'] - global_mean_temp)
 
-    # Ratio features
-    d['fwi_humidity_ratio']  = d['FWI']       / (d['humidity']  + 1)
-    d['temp_rainfall_ratio'] = d['temp']       / (d['rainfall']  + 0.1)
-    d['wind_humidity_ratio'] = d['wind_speed'] / (d['humidity']  + 1)
+    df['fwi_humidity_ratio']  = df['FWI'] / (df['humidity'] + 1)
+    df['temp_rainfall_ratio'] = df['temp'] / (df['rainfall'] + 0.1)
+    df['wind_humidity_ratio'] = df['wind_speed'] / (df['humidity'] + 1)
 
-    # Categorical features (same bins as All.ipynb)
-    d['temp_category'] = pd.cut(
-        d['temp'],
-        bins=[-np.inf, 0, 10, 20, 30, np.inf],
-        labels=[0, 1, 2, 3, 4]
-    ).fillna(0).astype(int)
+    df['temp_category']     = pd.cut(
+        df['temp'], bins=[-np.inf, 0, 10, 20, 30, np.inf], labels=[0, 1, 2, 3, 4]
+    ).astype(float).fillna(0)
+    df['humidity_category'] = pd.cut(
+        df['humidity'], bins=[-np.inf, 30, 50, 70, np.inf], labels=[0, 1, 2, 3]
+    ).astype(float).fillna(0)
+    df['fwi_category']      = pd.cut(
+        df['FWI'], bins=[-np.inf, 5, 10, 20, np.inf], labels=[0, 1, 2, 3]
+    ).astype(float).fillna(0)
 
-    d['humidity_category'] = pd.cut(
-        d['humidity'],
-        bins=[0, 30, 50, 70, 100],
-        labels=[0, 1, 2, 3]
-    ).fillna(0).astype(int)
-
-    d['fwi_category'] = pd.cut(
-        d['FWI'],
-        bins=[0, 5, 10, 20, np.inf],
-        labels=[0, 1, 2, 3]
-    ).fillna(0).astype(int)
-
-    # Log transform
-    d['log_fwi'] = np.log1p(d['FWI'])
-
-    return d
-
-
-# --- Load ---------------------------------------------------------------------
-
-def load_raw_data() -> pd.DataFrame:
-    print(f"[DataLoader] Loading: {config.RAW_DATA_FILE}")
-    df = pd.read_csv(config.RAW_DATA_FILE)
-    df['date']  = pd.to_datetime(df['date'])
-    df['year']  = df['date'].dt.year
-    df['month'] = df['date'].dt.month
-
-    if 'Unnamed: 0' in df.columns:
-        df.drop(columns=['Unnamed: 0'], inplace=True)
-
-    print("[DataLoader] Engineering features...")
-    df = engineer_features(df)
-
-    missing = [c for c in config.FEATURE_COLS if c not in df.columns]
-    if missing:
-        raise ValueError(f"[DataLoader] Missing feature columns: {missing}")
-
-    print(f"[DataLoader] Loaded {len(df):,} rows | "
-          f"{df['latitude'].nunique()} lats x {df['longitude'].nunique()} lons | "
-          f"Dates: {df['date'].min().date()} to {df['date'].max().date()} | "
-          f"Features: {len(config.FEATURE_COLS)}")
+    df['log_fwi'] = np.log1p(df['FWI'])
     return df
 
 
-# --- Sequence Builder ---------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Sequence Construction
+# ---------------------------------------------------------------------------
 
-def build_sequences_for_location(
-    loc_df:  pd.DataFrame,
-    seq_len: int = config.SEQ_LEN,
-) -> tuple:
+def _build_sequences(
+    location_df: pd.DataFrame,
+    feature_cols: list,
+    target_col: str,
+    seq_len: int,
+    stride: int = 1,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    For a single (lat, lon) group sorted by date, creates rolling windows.
+    Builds rolling windows of length `seq_len` for a single location.
 
-    Returns
-    -------
-    X : np.ndarray  shape (N_windows, seq_len, n_features)
-    y : np.ndarray  shape (N_windows,)  - label of LAST day in window
+    Returns:
+        X      : (n_seqs, seq_len, n_features) float32
+        y      : (n_seqs,) int32
+        years  : (n_seqs,) int  — year of the TARGET (last+1) day, for splitting
     """
-    features = loc_df[config.FEATURE_COLS].values.astype(np.float32)
-    labels   = loc_df[config.TARGET_COL].values.astype(np.float32)
+    loc_df = location_df.sort_values('date').reset_index(drop=True)
+    feat   = loc_df[feature_cols].values.astype(np.float32)
+    targ   = loc_df[target_col].values.astype(np.int32)
+    dates  = pd.to_datetime(loc_df['date'])
 
-    X_list, y_list = [], []
-    n = len(features)
-    for i in range(0, n - seq_len, config.STRIDE):
-        X_list.append(features[i : i + seq_len])
-        y_list.append(labels[i + seq_len - 1])
+    X, y, years = [], [], []
+    n = len(loc_df)
+    for i in range(0, n - seq_len, stride):
+        X.append(feat[i : i + seq_len])
+        y.append(targ[i + seq_len])
+        years.append(dates.iloc[i + seq_len].year)
 
-    if len(X_list) == 0:
-        return (np.empty((0, seq_len, len(config.FEATURE_COLS)), dtype=np.float32),
-                np.empty((0,), dtype=np.float32))
+    if not X:
+        return np.empty((0, seq_len, len(feature_cols)), dtype=np.float32), \
+               np.empty(0, dtype=np.int32), \
+               np.empty(0, dtype=np.int32)
 
-    return np.stack(X_list, axis=0), np.array(y_list, dtype=np.float32)
-
-
-def build_all_sequences(df: pd.DataFrame) -> tuple:
-    """
-    Iterates over all (lat, lon) locations and builds sequences.
-
-    Returns
-    -------
-    X      : (N, seq_len, n_features)
-    y      : (N,)
-    years  : (N,)  - year of the last day in each window (for split)
-    """
-    print(f"\n[SeqBuilder] Building {config.SEQ_LEN}-day sequences "
-          f"over {len(config.FEATURE_COLS)} features...")
-    all_X, all_y, all_years = [], [], []
-
-    locations = df.groupby(config.LOCATION_COLS)
-    n_locs    = len(locations)
-
-    for idx, ((lat, lon), grp) in enumerate(locations):
-        grp_sorted = grp.sort_values(config.DATE_COL).reset_index(drop=True)
-        X_loc, y_loc = build_sequences_for_location(grp_sorted)
-
-        if len(X_loc) == 0:
-            continue
-
-        years_loc = grp_sorted['year'].values[
-            config.SEQ_LEN - 1 : config.SEQ_LEN - 1 + len(X_loc)
-        ]
-
-        all_X.append(X_loc)
-        all_y.append(y_loc)
-        all_years.append(years_loc)
-
-        if (idx + 1) % 30 == 0 or (idx + 1) == n_locs:
-            print(f"  Processed {idx + 1}/{n_locs} locations...")
-
-    X     = np.concatenate(all_X,     axis=0)
-    y     = np.concatenate(all_y,     axis=0)
-    years = np.concatenate(all_years, axis=0)
-
-    print(f"[SeqBuilder] Sequences: {len(X):,} | Shape: {X.shape} | "
-          f"Fire rate: {y.mean() * 100:.2f}%")
-    return X, y, years
+    return (np.array(X, dtype=np.float32),
+            np.array(y, dtype=np.int32),
+            np.array(years, dtype=np.int32))
 
 
-# --- Temporal Train/Test Split ------------------------------------------------
-
-def temporal_split(X, y, years) -> tuple:
-    """
-    Hold-out test split: TEST_YEARS (2019, 2020).
-    Prevents temporal data leakage — required for journal evaluation.
-    """
-    test_mask  = np.isin(years, config.TEST_YEARS)
-    train_mask = ~test_mask
-
-    X_train, y_train = X[train_mask], y[train_mask]
-    X_test,  y_test  = X[test_mask],  y[test_mask]
-
-    print(f"\n[Split] Train: {len(X_train):,} sequences "
-          f"(fire rate {y_train.mean()*100:.2f}%)")
-    print(f"[Split] Test:  {len(X_test):,}  sequences "
-          f"(fire rate {y_test.mean()*100:.2f}%)")
-    return X_train, X_test, y_train, y_test
-
-
-# --- Feature Scaling ----------------------------------------------------------
-
-def scale_sequences(X_train, X_val, X_test, save_scaler=True) -> tuple:
-    """
-    StandardScaler fitted on training data only.
-    Flattens (N, seq, feat) → (N*seq, feat), scales, reshapes back.
-    """
-    n_train, seq_len, n_feat = X_train.shape
-    n_val                    = X_val.shape[0]
-    n_test                   = X_test.shape[0]
-
-    scaler    = StandardScaler()
-    X_tr_sc   = scaler.fit_transform(
-                    X_train.reshape(-1, n_feat)
-                ).reshape(n_train, seq_len, n_feat).astype(np.float32)
-    X_va_sc   = scaler.transform(
-                    X_val.reshape(-1, n_feat)
-                ).reshape(n_val, seq_len, n_feat).astype(np.float32)
-    X_te_sc   = scaler.transform(
-                    X_test.reshape(-1, n_feat)
-                ).reshape(n_test, seq_len, n_feat).astype(np.float32)
-
-    if save_scaler:
-        path = os.path.join(config.MODELS_DIR, "scaler.pkl")
-        joblib.dump(scaler, path)
-        print(f"[Scaler] Saved -> {path}")
-
-    return X_tr_sc, X_va_sc, X_te_sc, scaler
-
-
-# --- SMOTE (applied ONLY to training fold) ------------------------------------
-
-from imblearn.over_sampling import SMOTE
-
-def apply_smote(X_train: np.ndarray, y_train: np.ndarray) -> tuple:
-    """
-    Applies SMOTE to 3D temporal sequences to address class imbalance.
-    MUST be called AFTER validation split so val set keeps natural distribution.
-
-    Flattens (N, seq_len, n_features) -> (N, seq_len * n_features),
-    applies SMOTE, reshapes back.
-    """
-    n_samples, seq_len, n_features = X_train.shape
-
-    print(f"\n[SMOTE] Before: {len(y_train):,} samples | Fire rate: {y_train.mean()*100:.2f}%")
-
-    X_flat          = X_train.reshape(n_samples, seq_len * n_features)
-    smote           = SMOTE(random_state=config.RANDOM_STATE)
-    X_sm_flat, y_sm = smote.fit_resample(X_flat, y_train)
-    X_sm            = X_sm_flat.reshape(-1, seq_len, n_features)
-
-    print(f"[SMOTE] After : {len(y_sm):,} samples | Fire rate: {y_sm.mean()*100:.2f}%")
-    return X_sm, y_sm
-
-
-# --- Master Pipeline ----------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Main Entry Point
+# ---------------------------------------------------------------------------
 
 def get_prepared_data() -> dict:
     """
-    End-to-end data preparation.
+    Full, leak-free data preparation pipeline for the LSTM models.
 
-    Pipeline:
-    1. Load & engineer features
-    2. Build 14-day sequences per location
-    3. Temporal train/test split (test = 2019-2020)
-    4. Carve out validation set from training (PRE-SMOTE) — real distribution
-    5. Scale (fitted on training fold only)
-    6. Apply SMOTE to training fold only
-
-    Returns dict of all arrays + metadata for training.
+    Returns a dict containing:
+        X_train, y_train  : SMOTE-balanced training set
+        X_val,   y_val    : Real-distribution validation set (pre-SMOTE carve)
+        X_test,  y_test   : Temporal hold-out (2019-2020)
+        seq_len            : int
+        n_features         : int
+        fwi_idx            : int  — column index of 'FWI' in FEATURE_COLS
     """
-    df                               = load_raw_data()
-    X, y, years                      = build_all_sequences(df)
-    X_train_full, X_test, y_train_full, y_test = temporal_split(X, y, years)
+    # ------------------------------------------------------------------
+    # 1. Load & engineer
+    # ------------------------------------------------------------------
+    print(f"[SequenceBuilder] Loading: {config.RAW_DATA_FILE}")
+    df = pd.read_csv(config.RAW_DATA_FILE, parse_dates=['date'])
+    df = _engineer_features(df)
 
-    # ── CRITICAL: split validation BEFORE SMOTE ──────────────────────────────
-    # Validation set must have the real fire distribution (~1.7%) so that
-    # Keras training recall is honest and matches final test recall.
-    # If val is carved from SMOTE'd data it looks great in training but
-    # collapses at test time (the "recall gap" bug).
-    X_train_raw, X_val, y_train_raw, y_val = train_test_split(
-        X_train_full, y_train_full,
+    # Validate all expected feature columns are present
+    missing = [c for c in config.FEATURE_COLS if c not in df.columns]
+    if missing:
+        raise ValueError(f"[SequenceBuilder] Missing feature columns: {missing}")
+
+    # ------------------------------------------------------------------
+    # 2. Build per-location sequences (flat — all locations pooled)
+    # ------------------------------------------------------------------
+    print(f"[SequenceBuilder] Building {config.SEQ_LEN}-day sequences per location...")
+    locations = df.groupby(config.LOCATION_COLS)
+    n_locs    = len(locations)
+
+    all_X, all_y, all_years = [], [], []
+    for i, (loc_key, loc_df) in enumerate(locations):
+        X_loc, y_loc, yrs_loc = _build_sequences(
+            loc_df, config.FEATURE_COLS, config.TARGET_COL,
+            seq_len=config.SEQ_LEN, stride=config.STRIDE,
+        )
+        if len(X_loc) > 0:
+            all_X.append(X_loc)
+            all_y.append(y_loc)
+            all_years.append(yrs_loc)
+        if (i + 1) % 30 == 0:
+            print(f"  ... {i+1}/{n_locs} locations processed")
+
+    X_all = np.concatenate(all_X, axis=0)
+    y_all = np.concatenate(all_y, axis=0)
+    years_all = np.concatenate(all_years, axis=0)
+
+    print(f"[SequenceBuilder] Total sequences : {len(X_all):,}")
+    print(f"[SequenceBuilder] Fire rate (all)  : {y_all.mean()*100:.2f}%")
+
+    # ------------------------------------------------------------------
+    # 3. Temporal train / test split — NO shuffling to preserve temporal order
+    # ------------------------------------------------------------------
+    test_mask  = np.isin(years_all, config.TEST_YEARS)
+    train_mask = ~test_mask
+
+    X_trainval, y_trainval = X_all[train_mask], y_all[train_mask]
+    X_test,     y_test     = X_all[test_mask],  y_all[test_mask]
+
+    print(f"[Split] Train+Val sequences: {len(X_trainval):,} "
+          f"(fire={y_trainval.mean()*100:.2f}%)")
+    print(f"[Split] Test sequences     : {len(X_test):,} "
+          f"(fire={y_test.mean()*100:.2f}%)")
+
+    # ------------------------------------------------------------------
+    # 4. Carve validation fold from training data BEFORE SMOTE & BEFORE scaling
+    #    Use stratified split to ensure val has some fire examples.
+    # ------------------------------------------------------------------
+    X_train_raw, X_val_raw, y_train_raw, y_val_raw = train_test_split(
+        X_trainval, y_trainval,
         test_size=config.VAL_SPLIT,
         random_state=config.RANDOM_STATE,
-        stratify=y_train_full,
+        stratify=y_trainval,
     )
-    print(f"\n[Val split] Val: {len(X_val):,} sequences "
-          f"(fire rate {y_val.mean()*100:.2f}%) — REAL distribution (pre-SMOTE)")
+    print(f"[Split] Train (pre-SMOTE)  : {len(X_train_raw):,} "
+          f"(fire={y_train_raw.mean()*100:.2f}%)")
+    print(f"[Split] Validation (real)  : {len(X_val_raw):,} "
+          f"(fire={y_val_raw.mean()*100:.2f}%)")
 
-    # Scale using training fold statistics
-    X_train_sc, X_val_sc, X_test_sc, scaler = scale_sequences(
-        X_train_raw, X_val, X_test
-    )
+    # ------------------------------------------------------------------
+    # 5. Fit scaler on training fold ONLY (prevent leakage)
+    # ------------------------------------------------------------------
+    print("[SequenceBuilder] Fitting StandardScaler on training fold...")
+    n_train, seq_len, n_feat = X_train_raw.shape
+    scaler = StandardScaler()
+    # Reshape to 2D for scaler, then back
+    X_train_2d = X_train_raw.reshape(-1, n_feat)
+    scaler.fit(X_train_2d)
 
-    # Apply SMOTE only to training
-    if getattr(config, 'USE_SMOTE', False):
-        X_train_sc, y_train_raw = apply_smote(X_train_sc, y_train_raw)
+    def _scale(X: np.ndarray) -> np.ndarray:
+        sh = X.shape
+        scaled = scaler.transform(X.reshape(-1, sh[-1]))
+        scaled = np.clip(scaled, -10.0, 10.0)
+        scaled = np.nan_to_num(scaled, nan=0.0, posinf=10.0, neginf=-10.0)
+        return scaled.reshape(sh).astype(np.float32)
 
-    print(f"\n[Ready] Features: {len(config.FEATURE_COLS)} | "
-          f"FWI idx: {config.FWI_FEATURE_IDX} ({config.FEATURE_COLS[config.FWI_FEATURE_IDX]})")
-    print(f"[Ready] X_train: {X_train_sc.shape} | X_val: {X_val_sc.shape} | X_test: {X_test_sc.shape}")
+    X_train_scaled = _scale(X_train_raw)
+    X_val_scaled   = _scale(X_val_raw)
+    X_test_scaled  = _scale(X_test)
+
+    # Save scaler for inference / notebook reproducibility
+    scaler_path = os.path.join(config.MODELS_DIR, "scaler.pkl")
+    joblib.dump(scaler, scaler_path)
+    print(f"[SequenceBuilder] Scaler saved: {scaler_path}")
+
+    # ------------------------------------------------------------------
+    # 6. SMOTE on training fold ONLY
+    # ------------------------------------------------------------------
+    if config.USE_SMOTE:
+        try:
+            from imblearn.over_sampling import SMOTE
+            print("[SMOTE] Applying SMOTE to training fold...")
+            n_tr, sl, nf = X_train_scaled.shape
+            X_2d         = X_train_scaled.reshape(n_tr, sl * nf)
+            sm           = SMOTE(random_state=config.RANDOM_STATE)
+            X_2d_res, y_train_balanced = sm.fit_resample(X_2d, y_train_raw)
+            X_train_balanced = X_2d_res.reshape(-1, sl, nf).astype(np.float32)
+            y_train_balanced = y_train_balanced.astype(np.float32)
+            print(f"[SMOTE] Training after SMOTE: {len(X_train_balanced):,} "
+                  f"(fire={y_train_balanced.mean()*100:.1f}%)")
+        except ImportError:
+            print("[SMOTE] imbalanced-learn not installed — skipping SMOTE. "
+                  "Install with: pip install imbalanced-learn")
+            X_train_balanced = X_train_scaled
+            y_train_balanced = y_train_raw.astype(np.float32)
+    else:
+        print("[SMOTE] Disabled in config — training on natural distribution.")
+        X_train_balanced = X_train_scaled
+        y_train_balanced = y_train_raw.astype(np.float32)
+
+    # ------------------------------------------------------------------
+    # 7. Return prepared data dict
+    # ------------------------------------------------------------------
+    fwi_idx = config.FEATURE_COLS.index('FWI')
 
     return {
-        "X_train":    X_train_sc,
-        "X_val":      X_val_sc,
-        "y_train":    y_train_raw,
-        "y_val":      y_val,
-        "X_test":     X_test_sc,
-        "y_test":     y_test,
-        "scaler":     scaler,
-        "n_features": X_train_sc.shape[2],
-        "seq_len":    X_train_sc.shape[1],
-        "fwi_idx":    config.FWI_FEATURE_IDX,
+        'X_train':    X_train_balanced,
+        'y_train':    y_train_balanced,
+        'X_val':      X_val_scaled,
+        'y_val':      y_val_raw.astype(np.float32),
+        'X_test':     X_test_scaled,
+        'y_test':     y_test.astype(np.float32),
+        'seq_len':    seq_len,
+        'n_features': n_feat,
+        'fwi_idx':    fwi_idx,
     }
-
-
-if __name__ == "__main__":
-    data = get_prepared_data()
-    print("\nFeature list used by LSTM:")
-    for i, col in enumerate(config.FEATURE_COLS):
-        tag = " <- FWI gate" if i == config.FWI_FEATURE_IDX else ""
-        print(f"  [{i:2d}] {col}{tag}")

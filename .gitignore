@@ -2,23 +2,53 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyo
+*.pyd
 venv/
+env/
 .env
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
 
-# Data and Notebooks
+# IDE and Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Jupyter & Notebooks
 *.ipynb
+.ipynb_checkpoints/
+*.nbconvert.ipynb
+
+# Data Files
 *.csv
+*.xlsx
+*.xls
+*.db
+
+# Archives
 *.zip
+*.rar
+*.tar.gz
+
+# Plots & Figures
+figures/
 *.png
 *.jpg
 *.jpeg
-*.pdf
+*.gif
+*.svg
+plots/
+docs/
+screenshots/
 
-# Experiments Folder
-# Keep the folder but ignore specific contents if needed
-# experiments/
-
-# LaTeX
+# LaTeX & Documentation
+*.tex
 *.aux
 *.fdb_latexmk
 *.fls
@@ -26,8 +56,43 @@ venv/
 *.synctex.gz
 *.toc
 *.out
+*.dvi
+*.bbl
+*.blg
+*.fls
+*.lof
+*.lot
+
+# Model Files (optional - uncomment if not needed)
+# *.keras
+# *.h5
+# *.pt
+# *.pkl
+
+# Cache & Temporary
+*.cache
+*.tmp
+*.temp
+*.bak
+*.backup
+~*
+.cache/
+tmp/
+temp/
+
+# OS Specific
+.DS_Store
+Thumbs.db
+.gitkeep
 
 # Specific Large Files
 FLAGED_data_enhanced.csv
 FLAGED_data_enhanced_with_lat_long.csv
-flutter_application_6 (2).zip
+FLAGED_data_enhanced\ copy.csv
+flutter_application_6\ (2).zip
+
+# Experiment Artifacts
+experiments/*.csv
+modis_India/*.csv
+research_plots/
+*.pyc.save

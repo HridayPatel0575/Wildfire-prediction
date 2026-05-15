@@ -28,7 +28,7 @@ DROPOUT_RATE   = 0.30
 LEARNING_RATE  = 0.001
 BATCH_SIZE     = 512
 EPOCHS         = 60
-PATIENCE       = 10
+PATIENCE       = 15          # Raised from 10: gives recall time to mature before stopping
 
 # --- Data Balancing ----------------------------------------------------------
 # SMOTE is applied ONLY to the training set (after carving out a real val set).
@@ -39,7 +39,7 @@ VAL_SPLIT      = 0.15       # Fraction of (pre-SMOTE) training data for validati
 
 # --- Focal Loss (for extreme class imbalance — fire events ≈ 1.72%) ----------
 # alpha: weight for the FIRE class (1). Higher → stronger recall focus.
-FOCAL_ALPHA    = 0.85
+FOCAL_ALPHA    = 0.90        # Raised from 0.85: stronger minority (fire) class weighting
 # gamma: focusing exponent. gamma=2 reduces easy-example loss by (1-p_t)^2.
 FOCAL_GAMMA    = 2.0
 # Physics-recall penalty weight (novel model only)

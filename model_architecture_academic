@@ -1,0 +1,70 @@
+digraph {
+	nodesep=0.5 rankdir=TB ranksep=0.7 splines=ortho
+	node [color="#343A40" fillcolor="#F8F9FA" fontname="Times-Roman" fontsize=12 margin=0.2 penwidth=1.5 shape=box style="rounded,filled"]
+	edge [color="#495057" fontname="Times-Roman" fontsize=10 penwidth=1.2]
+	Input [label="Input Weather Sequence
+(batch x 14 x 35)" fillcolor="#E9ECEF" style=filled]
+	subgraph cluster_lstm {
+		color=gray fontname="Times-Roman" label="Branch 1: LSTM Temporal" style=dashed
+		LSTM1 [label="LSTM Layer 1
+128 units, return_seq=True"]
+		Drop1 [label="Dropout (30%)"]
+		LSTM2 [label="LSTM Layer 2
+64 units, return_seq=False"]
+		Drop2 [label="Dropout (30%)"]
+		Dense1 [label="Dense (32 units, ReLU)"]
+		Drop3 [label="Dropout (20%)"]
+		LogitLSTM [label="logit_lstm
+Dense(1)"]
+		LSTM1 -> Drop1
+		Drop1 -> LSTM2
+		LSTM2 -> Drop2
+		Drop2 -> Dense1
+		Dense1 -> Drop3
+		Drop3 -> LogitLSTM
+	}
+	subgraph cluster_physics {
+		color=gray fontname="Times-Roman" label="Branch 2: Physics Statistics" style=dashed
+		FWI_Col [label="Extract FWI Column"]
+		"Mean FWI" [label="Mean FWI" fillcolor="#FFFFFF"]
+		FWI_Col -> "Mean FWI"
+		"Mean FWI" -> Concat
+		"Max FWI" [label="Max FWI" fillcolor="#FFFFFF"]
+		FWI_Col -> "Max FWI"
+		"Max FWI" -> Concat
+		"FWI Trend" [label="FWI Trend" fillcolor="#FFFFFF"]
+		FWI_Col -> "FWI Trend"
+		"FWI Trend" -> Concat
+		"Fraction Elevated Days" [label="Fraction Elevated Days" fillcolor="#FFFFFF"]
+		FWI_Col -> "Fraction Elevated Days"
+		"Fraction Elevated Days" -> Concat
+		"FWI Volatility" [label="FWI Volatility" fillcolor="#FFFFFF"]
+		FWI_Col -> "FWI Volatility"
+		"FWI Volatility" -> Concat
+		"Fraction Extreme Days" [label="Fraction Extreme Days" fillcolor="#FFFFFF"]
+		FWI_Col -> "Fraction Extreme Days"
+		"Fraction Extreme Days" -> Concat
+		Concat [label="Concatenate 6 Statistics"]
+		BatchNorm [label="Batch Normalization"]
+		LogitPhysics [label="logit_physics
+Dense(1)"]
+		Concat -> BatchNorm
+		BatchNorm -> LogitPhysics
+	}
+	AlphaGate [label="Trainable Gate (α)" fillcolor="#FFFFFF" style="dashed,filled"]
+	ScaledPhysics [label="Scaled Physics
+(α × logit_physics)"]
+	ResidualFusion [label="Residual Fusion
+(final_logit = logit_lstm + Scaled Physics)" fillcolor="#DEE2E6"]
+	Sigmoid [label="Sigmoid Activation"]
+	Output [label="Fire Probability
+(Output)" fillcolor="#D1E7DD" style="filled,bold"]
+	Input -> LSTM1 [label=" 35 features"]
+	Input -> FWI_Col [label=" FWI extracted"]
+	LogitPhysics -> ScaledPhysics
+	AlphaGate -> ScaledPhysics
+	ScaledPhysics -> ResidualFusion
+	LogitLSTM -> ResidualFusion
+	ResidualFusion -> Sigmoid
+	Sigmoid -> Output
+}

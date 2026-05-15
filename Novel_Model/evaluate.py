@@ -128,8 +128,18 @@ def compute_metrics(
 # --- Comparison Table ---------------------------------------------------------
 
 def build_comparison_table(novel_metrics: dict,
-                            baseline_metrics: dict = None) -> pd.DataFrame:
-    """Full comparison: RF / XGBoost / ANN / Vanilla LSTM / FWI-Gated LSTM."""
+                            baseline_metrics: dict = None,
+                            novel_metrics_acc: dict = None,
+                            novel_metrics_op: dict = None) -> pd.DataFrame:
+    """Full comparison: RF / XGBoost / ANN / Vanilla LSTM / FWI-Gated LSTM.
+
+    Parameters
+    ----------
+    novel_metrics      : Metrics at the recall-optimal threshold.
+    baseline_metrics   : Vanilla LSTM metrics.
+    novel_metrics_acc  : Optional — FWI-Gated LSTM at max-accuracy threshold.
+    novel_metrics_op   : Optional — FWI-Gated LSTM at max-recall threshold (t=0.10).
+    """
     rows = []
     for name, m in BASELINES.items():
         rows.append({
@@ -155,6 +165,7 @@ def build_comparison_table(novel_metrics: dict,
             'AUC-PR ↑':  f"{baseline_metrics['auc_pr']:.3f}",
         })
 
+    # Main novel-model row (recall-optimal threshold)
     rows.append({
         'Model':     '★ FWI-Gated LSTM (Proposed)',
         'Threshold': f"{novel_metrics['threshold']:.3f}",
@@ -165,6 +176,32 @@ def build_comparison_table(novel_metrics: dict,
         'AUC-ROC':   f"{novel_metrics['auc_roc']:.3f}",
         'AUC-PR ↑':  f"{novel_metrics['auc_pr']:.3f}",
     })
+
+    # Max-accuracy row — threshold that maximises accuracy for the novel model
+    if novel_metrics_acc is not None:
+        rows.append({
+            'Model':     '★ FWI-Gated LSTM — Max Accuracy',
+            'Threshold': f"{novel_metrics_acc['threshold']:.3f}",
+            'Accuracy':  f"{novel_metrics_acc['accuracy']:.3f}",
+            'Precision': f"{novel_metrics_acc['precision']:.3f}",
+            'Recall ↑':  f"{novel_metrics_acc['recall']:.3f}",
+            'F1-Score':  f"{novel_metrics_acc['f1']:.3f}",
+            'AUC-ROC':   f"{novel_metrics['auc_roc']:.3f}",  # threshold-independent
+            'AUC-PR ↑':  f"{novel_metrics['auc_pr']:.3f}",  # threshold-independent
+        })
+
+    # Max-recall row — t=0.10 operating point (highest fire detection rate)
+    if novel_metrics_op is not None:
+        rows.append({
+            'Model':     '★ FWI-Gated LSTM — Max Recall (t=0.10)',
+            'Threshold': f"{novel_metrics_op['threshold']:.2f}",
+            'Accuracy':  f"{novel_metrics_op['accuracy']:.3f}",
+            'Precision': f"{novel_metrics_op['precision']:.3f}",
+            'Recall ↑':  f"{novel_metrics_op['recall']:.3f}",
+            'F1-Score':  f"{novel_metrics_op['f1']:.3f}",
+            'AUC-ROC':   f"{novel_metrics['auc_roc']:.3f}",  # threshold-independent
+            'AUC-PR ↑':  f"{novel_metrics['auc_pr']:.3f}",  # threshold-independent
+        })
 
     df = pd.DataFrame(rows)
     print("\n" + "="*65)
